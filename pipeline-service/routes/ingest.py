@@ -19,31 +19,32 @@ def ingest(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch from mock server: {e}") from e
 
-    records_processed = 0
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is not set")
 
+    # Use dlt to ingest the raw payload into a staging table, then upsert into the
+    # target SQLAlchemy-managed table. This avoids dlt adding internal _dlt_* columns
+    # to the canonical `customers` table.
     try:
-        database_url = os.getenv("DATABASE_URL")
-        if not database_url:
-            raise RuntimeError("DATABASE_URL is not set")
-
         pipeline = dlt.pipeline(
             pipeline_name="customer_pipeline",
             destination="postgres",
-            dataset_name="public",
+            dataset_name="staging",
         )
         pipeline.run(
             customers,
-            table_name="customers",
-            write_disposition="merge",
-            primary_key="customer_id",
+            table_name="customers_raw",
+            write_disposition="append",
             credentials=database_url,
         )
-        records_processed = len(customers)
-    except Exception:
-        try:
-            records_processed = upsert_customers(db, customers)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to ingest customers: {e}") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"dlt load failed: {e}") from e
+
+    try:
+        records_processed = upsert_customers(db, customers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to ingest customers: {e}") from e
 
     return {"status": "success", "records_processed": records_processed}
 
